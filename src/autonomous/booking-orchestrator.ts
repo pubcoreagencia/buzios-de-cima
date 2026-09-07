@@ -1,253 +1,188 @@
-/**
- * Booking Orchestrator - Setor 7
- * Empreendimento Búzios de Cima & Produção Cinema Drone 4K
- *
- * Coordena reservas de hospedagem boutique + sessões de cinema aéreo 4K
- * em uma única esteira com validação, pricing dinâmico e idempotência.
- */
+import { RealEstateHospitalityTechLeadEngine } from './real-estate-hospitality-tech-leadEngine';
+import { CinemaDroneBookingEngine } from './cinema-drone-booking-engine';
+import { ArchitectEngine } from './architectEngine';
 
-export type StayTier = 'standard' | 'panoramic' | 'penthouse';
-export type DronePackage = 'sunrise-4k' | 'sunset-4k' | 'full-day-cinema';
-exnort type Currency = 'BRL' | 'USD' | 'EUR';
-
-interface StayUnit {
-  id: string
-  tier: StayTier
-  basePricePerNight: Record<Currency, number>
-  maxGuests: number
-  cinematicView: boolean
-}
-
-interface DroneServiceConfig {
-  package: DronePackage
-  basePrice: Record<Currency, number>
-  durationHours: number
-  resolution: '4K' | '6K' | '8K'
-  includesRawFootage: boolean
-  droneFleet: string[]
-}
-
-export interface BookingRequest {
-  guestId: string
-  unitId: string
-  checkIn: string
-  checkOut: string
-  guests: number
-  currency: Currency
-  addons?: {
-    dronePackage?: DronePackage
-    privateChef?: boolean
-    yachtTransfer?: boolean
-  }
-  idempotencyKey: string
-}
-
-export interface PriceBreakdown {
-  nights: number
-  nightly: number
-  subtotalStay: number
-  droneTotal: number
-  addonsTotal: number
-  tourismTax: number
-  total: number
-  currency: Currency
-}
-
-export interface BookingResult {
-  bookingId: string
-  status: 'CONFIRMED' | 'PENDING' | 'REJECTED'
-  pricing: PriceBreakdown
-  unit: StayUnit
-  droneSession?: { package: DronePackage; scheduledAt: string }
-  message: string
-  createdAt: string
-}
-
-const STAY_UNITS: StayUnit[] = [
-  {
-    id: 'BZ-S-01',
-    tier: 'standard',
-    basePricePerNight: { BRL: 1800, USD: 360, EUR: 330 },
-    maxGuests: 2,
-    cinematicView: false,
-  },
-  {
-    id: 'BZ-P-04',
-    tier: 'panoramic',
-    basePricePerNight: { BRL: 3200, USD: 640, EUR: 590 },
-    maxGuests: 4,
-    cinematicView: true,
-  },
-  {
-    id: 'BZ-PH-07',
-    tier: 'penthouse',
-    basePricePerNight: { BRL: 7800, USD: 1560, EUR: 1440 },
-    maxGuests: 6,
-    cinematicView: true,
-  },
-];
-
-const DRONE_PACKAGES: Record<DronePackage, DroneServiceConfig> = {
-  'sunrise-4k': {
-    package: 'sunrise-4k',
-    basePrice: { BRL: 2400, USD: 480, EUR: 440 },
-    durationHours: 2,
-    resolution: '4K',
-    includesRawFootage: true,
-    droneFleet: ['DJI Inspire 3', 'DJI Mavic 3 Pro Cine'],
-  },
-  'sunset-4k': {
-    package: 'sunset-4k',
-    basePrice: { BRL: 2900, USD: 580, EUR: 535 },
-    durationHours: 3,
-    resolution: '4K',
-    includesRawFootage: true,
-    droneFleet: ['DJI Inspire 3', 'DJI Mavic 3 Pro Cine', 'Freefly Alta X'],
-  },
-  'full-day-cinema': {
-    package: 'full-day-cinema',
-    basePrice: { BRL: 14500, USD: 2900, EUR: 2680 },
-    durationHours: 10,
-    resolution: '8K',
-    includesRawFootage: true,
-    droneFleet: ['DJI Inspire 3', 'Freefly Alta X', 'DJI X9-8K', 'RED Komodo'],
-  },
+export type GuestProfile = {
+  id: string;
+  fullName: string;
+  email: string;
+  phone: string;
+  document: string;
+  vipTier: 'standard' | 'gold' | 'platinum' | 'founder';
+  preferences: {
+    checkInWindow: { from: string; to: string };
+    partySize: number;
+    droneCoverage: boolean;
+    cinematicPackage: boolean;
+  };
 };
 
-const ADDON_PRICES: Record<string, Record<Currency, number>> = {
-  privateChef: { BRL: 950, USD: 190, EUR: 175 },
-  yachtTransfer: { BRL: 1800, USD: 360, EUR: 330 },
+export type HospitalityUnit = {
+  id: string;
+  label: string;
+  capacity: number;
+  nightlyRateBRL: number;
+  amenities: string[];
+  droneFriendly: boolean;
 };
 
-const TOURISM_TAX_RATE = 0.05; // 5% taxa de turismo boutique
-const idempotencyCache = new Map<string, BookingResult>();
+export type BookingRequest = {
+  requestId: string;
+  guest: GuestProfile;
+  unitId: string;
+  arrival: string;
+  departure: string;
+  addons: {
+    cinemaDrone4K: boolean;
+    privateChef: boolean;
+    yachtTransfer: boolean;
+  };
+};
 
-function diffNights(checkIn: string, checkOut: string): number {
-  const a = new Date(checkIn).getTime();
-  const b = new Date(checkOut).getTime();
-  if (isNaN(a) || isNaN(b) || b <= a) return 0;
-  return Math.ceil((b - a) / (1000 * 60 * 60 * 24));
-}
+export type BookingQuote = {
+  requestId: string;
+  unitId: string;
+  nights: number;
+  baseSubtotal: number;
+  cinemaDroneFee: number;
+  privateChefFee: number;
+  yachtTransferFee: number;
+  hospitalityTechFee: number;
+  totalBRL: number;
+  status: 'pending' | 'confirmed' | 'rejected';
+  rejectionReason?: string;
+  engineeredAt: string;
+};
 
-function generateBookingId(): string {
-  const ts = Date.now().toString(36).toUpperCase();
-  const rnd = Math.random().toString(36).slice(2, 8).toUpperCase();
-  return `BZ-${ts}-${rnd}`;
-}
+const ADDON_PRICING = {
+  cinemaDronePerFlight: 1850,
+  privateChefPerNight: 980,
+  yachtTransferOneWay: 1450,
+};
 
-function validateRequest(req: BookingRequest, unit: StayUnit): string[] {
-  const errors: string[] = [];
-  const nights = diffNights(req.checkIn, req.checkOut);
-  if (nights < 1) errors.push('INVALID_DATE_RANGE');
-  if (req.guests < 1) errors.push('INVALID_GUEST_COUNT');
-  if (req.guests > unit.maxGuests) errors.push('GUESTS_EXCEED_UNIT_CAPACITY');
-  if (!['BRL', 'USD', 'EUR'].includes(req.currency)) errors.push('UNSUPPORTED_CURRENCY');
-  if (!req.idempotencyKey || req.idempotencyKey.length < 8) errors.push('INVALID_IDEMPOTENCY_KEY');
-  return errors;
-}
+const HOSPITALITY_TECH_FEE_RATE = 0.04;
 
 export class BookingOrchestrator {
-  private readonly units: StayUnit[];
+  private static instance: BookingOrchestrator;
+  private readonly quotes: Map<string, BookingQuote> = new Map();
 
-  constructor(units: StayUnit[] = STAY_UNITS) {
-    this.units = units;
-  }
+  private constructor(
+    private readonly hospitalityEngine = RealEstateHospitalityTechLeadEngine.bootstrap(),
+    private readonly droneEngine = CinemaDroneBookingEngine.bootstrap(),
+    private readonly architect = ArchitectEngine.bootstrap(),
+  ) {}
 
-  listUnits(): StayUnit[] {
-    return [...this.units];
-  }
-
-  listDronePackages(): DroneServiceConfig[] {
-    return Object.values(DRONE_PACKAGES);
-  }
-
-  /**
-   * Cria uma reserva integrada (stay + drone cinema 4K) com idempotência.
-   */
-  createBooking(req: BookingRequest): BookingResult {
-    const cached = idempotencyCache.get(req.idempotencyKey);
-    if (cached) return cached;
-
-    const unit = this.units.find((u) => u.id === req.unitId);
-    if (!unit) {
-      return this.buildRejected('UNIT_NOT_FOUND');
+  static bootstrap(): BookingOrchestrator {
+    if (!BookingOrchestrator.instance) {
+      BookingOrchestrator.instance = new BookingOrchestrator();
     }
-
-    const errors = validateRequest(req, unit);
-    if (errors.length > 0) {
-      return this.buildRejected(errors.join(','));
-    }
-
-    const nights = diffNights(req.checkIn, req.checkOut);
-    const nightly = unit.basePricePerNight[req.currency];
-    const subtotalStay = nightly * nights;
-
-    let droneTotal = 0;
-    let droneSession: BookingResult['droneSession'];
-    if (req.addons?.dronePackage) {
-      const pkg = DRONE_PACKAGES[req.addons.dronePackage];
-      droneTotal = pkg.basePrice[req.currency];
-      // Sessão drone agendada para o 2º dia de stay às 05:30 (sunrise) ou 17:00 (sunset/full)
-      const start = new Date(req.checkIn);
-      start.setDate(start.getDate() + 1);
-      const hour = req.addons.dronePackage === 'sunrise-4k' ? 5 : req.addons.dronePackage === 'sunset-4k' ? 17 : 8;
-      start.setHours(hour, 30, 0, 0);
-      droneSession = {
-        package: req.addons.dronePackage,
-        scheduledAt: start.toISOString(),
-      };
-    }
-
-    let addonsTotal = 0;
-    if (req.addons?.privateChef) addonsTotal += ADDON_PRICES.privateChef[req.currency];
-    if (req.addons?.yachtTransfer) addonsTotal += ADDON_PRICES.yachtTransfer[req.currency];
-
-    const taxableBase = subtotalStay + droneTotal + addonsTotal;
-    const tourismTax = Number((taxableBase * TOURISM_TAX_RATE).toFixed(2));
-    const total = Number((taxableBase + tourismTax).toFixed(2));
-
-    const result: BookingResult = {
-      bookingId: generateBookingId(),
-      status: 'CONFIRMED',
-      pricing: {
-        nights,
-        nightly,
-        subtotalStay,
-        droneTotal,
-        addonsTotal,
-        tourismTax,
-        total,
-        currency: req.currency,
-      },
-      unit,
-      droneSession,
-      message: `Reserva confirmada em Búzios de Cima — ${unit.tier.toUpperCase()} por ${nights} noite(s).`,
-      createdAt: new Date().toISOString(),
-    };
-
-    idempotencyCache.set(req.idempotencyKey, result);
-    return result;
+    return BookingOrchestrator.instance;
   }
 
-  private buildRejected(reason: string): BookingResult {
-    return {
-      bookingId: '',
-      status: 'REJECTED',
-      pricing: {
+  async orchestrate(request: BookingRequest, unit: HospitalityUnit): Promise<BookingQuote> {
+    const nights = this.computeNights(request.arrival, request.departure);
+    if (nights <= 0) {
+      return this.persist({
+        requestId: request.requestId,
+        unitId: unit.id,
         nights: 0,
-        nightly: 0,
-        subtotalStay: 0,
-        droneTotal: 0,
-        addonsTotal: 0,
-        tourismTax: 0,
-        total: 0,
-        currency: 'BRL',
-      },
-      unit: STAY_UNITS[0],
-      message: `Reserva rejeitada: ${reason}`,
-      createdAt: new Date().toISOString(),
-    };
+        baseSubtotal: 0,
+        cinemaDroneFee: 0,
+        privateChefFee: 0,
+        yachtTransferFee: 0,
+        hospitalityTechFee: 0,
+        totalBRL: 0,
+        status: 'rejected',
+        rejectionReason: 'Janela de dates inválida para a estadia.',
+        engineeredAt: new Date().toISOString(),
+      });
+    }
+
+    const capacityCheck = this.architect.validateCapacity(unit, request.guest.preferences.partySize);
+    if (!capacityCheck.ok) {
+      return this.persist({
+        requestId: request.requestId,
+        unitId: unit.id,
+        nights,
+        baseSubtotal: 0,
+        cinemaDroneFee: 0,
+        privateChefFee: 0,
+        yachtTransferFee: 0,
+        hospitalityTechFee: 0,
+        totalBRL: 0,
+        status: 'rejected',
+        rejectionReason: capacityCheck.reason,
+        engineeredAt: new Date().toISOString(),
+      });
+    }
+
+    const baseSubtotal = nights * unit.nightlyRateBRL;
+    const cinemaDroneFee = request.addons.cinemaDrone4K
+      ? ADDON_PRICING.cinemaDronePerFlight
+      : 0;
+    const privateChefFee = request.addons.privateChef
+      ? nights * ADDON_PRICING.privateChefPerNight
+      : 0;
+    const yachtTransferFee = request.addons.yachtTransfer
+      ? ADDON_PRICING.yachtTransferOneWay * 2
+      : 0;
+
+    const preFeeSubtotal = baseSubtotal + cinemaDroneFee + privateChefFee + yachtTransferFee;
+    const hospitalityTechFee = Math.round(preFeeSubtotal * HOSPITALITY_TECH_FEE_RATE * 100) / 100;
+
+    const totalBRL = Math.round((preFeeSubtotal + hospitalityTechFee) * 100) / 100;
+
+    const droneBookingId = request.addons.cinemaDrone4K
+      ? await this.droneEngine.scheduleCoverage({
+          bookingId: request.requestId,
+          unitId: unit.id,
+          windows: this.droneEngine.defaultWindowsForStay(request.arrival, request.departure),
+          tier: request.guest.vipTier,
+        })
+      : null;
+
+    await this.hospitalityEngine.persistReservation({
+      requestId: request.requestId,
+      guestId: request.guest.id,
+      unitId: unit.id,
+      totalBRL,
+      droneBookingId,
+    });
+
+    return this.persist({
+      requestId: request.requestId,
+      unitId: unit.id,
+      nights,
+      baseSubtotal,
+      cinemaDroneFee,
+      privateChefFee,
+      yachtTransferFee,
+      hospitalityTechFee,
+      totalBRL,
+      status: 'confirmed',
+      engineeredAt: new Date().toISOString(),
+    });
+  }
+
+  listQuotes(): BookingQuote[] {
+    return Array.from(this.quotes.values());
+  }
+
+  getQuote(requestId: string): BookingQuote | undefined {
+    return this.quotes.get(requestId);
+  }
+
+  private persist(quote: BookingQuote): BookingQuote {
+    this.quotes.set(quote.requestId, quote);
+    return quote;
+  }
+
+  private computeNights(arrival: string, departure: string): number {
+    const start = Date.parse(arrival);
+    const end = Date.parse(departure);
+    if (Number.isNaN(start) || Number.isNaN(end)) return 0;
+    return Math.max(0, Math.round((end - start) / (1000 * 60 * 60 * 24)));
   }
 }
 
-export default BookingOrchestrator;
+export const bookingOrchestrator = BookingOrchestrator.bootstrap();
